@@ -321,6 +321,13 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
         coalesceSameSenderDms: {
           type: "boolean",
         },
+        trainerMode: {
+          type: "string",
+          enum: ["reply", "training", "supervised"],
+        },
+        trainerNotifyNumber: {
+          type: "string",
+        },
         accounts: {
           type: "object",
           properties: {},
@@ -637,6 +644,13 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
               },
               coalesceSameSenderDms: {
                 type: "boolean",
+              },
+              trainerMode: {
+                type: "string",
+                enum: ["reply", "training", "supervised"],
+              },
+              trainerNotifyNumber: {
+                type: "string",
               },
             },
             required: ["enrichGroupParticipantsFromContacts"],

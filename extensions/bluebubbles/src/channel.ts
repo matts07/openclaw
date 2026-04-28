@@ -15,6 +15,7 @@ import {
 import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
 import {
   type ResolvedBlueBubblesAccount,
+  resolveBlueBubblesAccount,
   resolveBlueBubblesEffectiveAllowPrivateNetwork,
 } from "./accounts.js";
 import { bluebubblesMessageActions } from "./actions.js";
@@ -317,6 +318,14 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount, BlueBu
       attachedResults: {
         channel: "bluebubbles",
         sendText: async ({ cfg, to, text, accountId, replyToId }) => {
+          const acct = resolveBlueBubblesAccount({ cfg, accountId: accountId ?? undefined });
+          const trainerMode = acct.config.trainerMode ?? "reply";
+          if (trainerMode === "training" || trainerMode === "supervised") {
+            throw new Error(
+              `[bluebubbles/trainer] Direct send blocked in "${trainerMode}" mode. ` +
+                `Write your reply as plain text — it will be reviewed by the owner before delivery.`,
+            );
+          }
           const runtime = await loadBlueBubblesChannelRuntime();
           const rawReplyToId = normalizeOptionalString(replyToId) ?? "";
           const replyToMessageGuid = rawReplyToId
@@ -329,8 +338,20 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount, BlueBu
           });
         },
         sendMedia: async (ctx) => {
+          const { cfg, accountId: ctxAccountId } = ctx;
+          const acctForMedia = resolveBlueBubblesAccount({
+            cfg,
+            accountId: ctxAccountId ?? undefined,
+          });
+          const trainerModeForMedia = acctForMedia.config.trainerMode ?? "reply";
+          if (trainerModeForMedia === "training" || trainerModeForMedia === "supervised") {
+            throw new Error(
+              `[bluebubbles/trainer] Direct media send blocked in "${trainerModeForMedia}" mode. ` +
+                `Describe the media in text — it will be reviewed by the owner before delivery.`,
+            );
+          }
           const runtime = await loadBlueBubblesChannelRuntime();
-          const { cfg, to, text, mediaUrl, accountId, replyToId, audioAsVoice } = ctx;
+          const { to, text, mediaUrl, accountId, replyToId, audioAsVoice } = ctx;
           const { mediaPath, mediaBuffer, contentType, filename, caption } = ctx as {
             mediaPath?: string;
             mediaBuffer?: Uint8Array;

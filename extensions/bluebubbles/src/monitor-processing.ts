@@ -13,6 +13,14 @@ import {
   downloadBlueBubblesAttachment,
   fetchBlueBubblesMessageAttachments,
 } from "./attachments.js";
+import {
+  applyTrainerAgentTag,
+  handleTrainerInbound,
+  resolveTrainerAllowFromEntries,
+  resolveTrainerDeliverContext,
+  trainerInterceptMediaSend,
+  trainerInterceptTextSend,
+} from "./bbtrainer.js";
 import { markBlueBubblesChatRead, sendBlueBubblesTyping } from "./chat.js";
 import { createBlueBubblesClientFromParts } from "./client.js";
 import { resolveBlueBubblesConversationRoute } from "./conversation-route.js";
@@ -862,9 +870,23 @@ async function processMessageAfterDedupe(
     `msg sender=${message.senderId} group=${isGroup} textLen=${text.length} attachments=${attachments.length} chatGuid=${message.chatGuid ?? ""} chatId=${message.chatId ?? ""}`,
   );
 
+  const trainerInboundResult = await handleTrainerInbound({
+    message,
+    account,
+    config,
+    runtime,
+    isGroup,
+  });
+  if (trainerInboundResult !== "passthrough") {
+    return;
+  }
+
   const dmPolicy = account.config.dmPolicy ?? "pairing";
   const groupPolicy = account.config.groupPolicy ?? "allowlist";
-  const configuredAllowFrom = mapAllowFromEntries(account.config.allowFrom);
+  const configuredAllowFrom = [
+    ...mapAllowFromEntries(account.config.allowFrom),
+    ...resolveTrainerAllowFromEntries(account),
+  ];
   const storeAllowFrom = await readStoreAllowFromForDmPolicy({
     provider: "bluebubbles",
     accountId: account.accountId,
@@ -991,6 +1013,8 @@ async function processMessageAfterDedupe(
     );
     return;
   }
+
+  // Agent runs a full session with all tools; trainer intercepts fire in the deliver callback.
 
   const chatId = message.chatId ?? undefined;
   const chatGuid = message.chatGuid ?? undefined;
@@ -1645,6 +1669,22 @@ async function processMessageAfterDedupe(
       dispatcherOptions: {
         ...replyPipeline,
         deliver: async (payload, info) => {
+          const mediaList = resolveOutboundMediaUrls(payload);
+          // Always-on delivery entry log — shows trainerMode even when it is "reply"
+          // so a bypass that skips the trainer block still leaves a trace.
+          runtime.log?.(
+            `[bluebubbles/deliver] kind=${info.kind} trainerMode=${account.config.trainerMode ?? "reply"}` +
+              ` isGroup=${isGroup} sender=${message.senderId ?? ""} outbound=${outboundTarget}` +
+              ` textLen=${(payload.text ?? "").length} mediaCount=${mediaList.length}`,
+          );
+          const trainerCtx = resolveTrainerDeliverContext({
+            account,
+            config,
+            isGroup,
+            message,
+            outboundTarget,
+            runtime,
+          });
           const rawReplyToId =
             privateApiEnabled && typeof payload.replyToId === "string"
               ? payload.replyToId.trim()
@@ -1653,8 +1693,17 @@ async function processMessageAfterDedupe(
           const replyToMessageGuid = rawReplyToId
             ? resolveBlueBubblesMessageId(rawReplyToId, { requireKnownShortId: true })
             : "";
-          const mediaList = resolveOutboundMediaUrls(payload);
           if (mediaList.length > 0) {
+            if (trainerCtx) {
+              await trainerInterceptMediaSend({
+                ctx: trainerCtx,
+                mediaCount: mediaList.length,
+                account,
+                config,
+                runtime,
+              });
+              return;
+            }
             const tableMode = core.channel.text.resolveMarkdownTableMode({
               cfg: config,
               channel: "bluebubbles",
@@ -1731,7 +1780,14 @@ async function processMessageAfterDedupe(
           if (!chunks.length) {
             return;
           }
+
+          if (trainerCtx) {
+            await trainerInterceptTextSend({ ctx: trainerCtx, text, account, config, runtime });
+            return;
+          }
+
           for (const chunk of chunks) {
+            const taggedChunk = applyTrainerAgentTag(chunk, account);
             const pendingId = rememberPendingOutboundMessageId({
               accountId: account.accountId,
               sessionKey: route.sessionKey,
@@ -1739,11 +1795,11 @@ async function processMessageAfterDedupe(
               chatGuid: chatGuidForActions ?? chatGuid,
               chatIdentifier,
               chatId,
-              snippet: chunk,
+              snippet: taggedChunk,
             });
             let result: Awaited<ReturnType<typeof sendMessageBlueBubbles>>;
             try {
-              result = await sendMessageBlueBubbles(outboundTarget, chunk, {
+              result = await sendMessageBlueBubbles(outboundTarget, taggedChunk, {
                 cfg: config,
                 accountId: account.accountId,
                 replyToMessageGuid: replyToMessageGuid || undefined,
@@ -1752,7 +1808,7 @@ async function processMessageAfterDedupe(
               forgetPendingOutboundMessageId(pendingId);
               throw err;
             }
-            if (maybeEnqueueOutboundMessageId(result.messageId, chunk)) {
+            if (maybeEnqueueOutboundMessageId(result.messageId, taggedChunk)) {
               forgetPendingOutboundMessageId(pendingId);
             }
             sentMessage = true;

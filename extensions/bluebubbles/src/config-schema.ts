@@ -95,6 +95,24 @@ const bluebubblesAccountSchema = z
     blockStreaming: z.boolean().optional(),
     groups: z.object({}).catchall(bluebubblesGroupConfigSchema).optional(),
     coalesceSameSenderDms: z.boolean().optional(),
+    /**
+     * Operating mode for supervised message training.
+     *
+     * - `reply` (default): normal behavior — agent responds on the originating channel thread.
+     * - `training`: inbound messages are intercepted before an agent session is created.
+     *   A draft reply is generated using the agent's SOUL.md voice profile and forwarded
+     *   to `trainerNotifyNumber`. The owner replies to log a training delta to MEMORY.md.
+     *   Nothing is ever sent to the original sender.
+     * - `supervised`: same as training, but the owner can approve sends.
+     *   "send XXXX" delivers the draft; "[msg-XXXX] custom text" delivers a custom version.
+     */
+    trainerMode: z.enum(["reply", "training", "supervised"]).optional(),
+    /**
+     * E.164 phone number to receive trainer notifications (required for training/supervised).
+     * Example: "+12402719348"
+     */
+    trainerNotifyNumber: z.string().optional(),
+    agentTag: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {
     const serverUrl = value.serverUrl?.trim() ?? "";
@@ -104,6 +122,17 @@ const bluebubblesAccountSchema = z
         code: z.ZodIssueCode.custom,
         path: ["password"],
         message: "password is required when serverUrl is configured",
+      });
+    }
+    const trainerMode = value.trainerMode ?? "reply";
+    if (
+      (trainerMode === "training" || trainerMode === "supervised") &&
+      !value.trainerNotifyNumber?.trim()
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["trainerNotifyNumber"],
+        message: "trainerNotifyNumber is required when trainerMode is training or supervised",
       });
     }
   });

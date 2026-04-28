@@ -116,6 +116,23 @@ export type BlueBubblesAccountConfig = {
    * `associatedMessageGuid`. Default: false.
    */
   coalesceSameSenderDms?: boolean;
+  /**
+   * Operating mode for supervised message training.
+   * - `reply` (default): normal behavior.
+   * - `training`: intercepts inbound messages, drafts a reply, forwards to owner for correction.
+   * - `supervised`: same as training, but owner can approve sends.
+   */
+  trainerMode?: "reply" | "training" | "supervised";
+  /** E.164 phone number to receive trainer notifications (required for training/supervised). */
+  trainerNotifyNumber?: string;
+  /**
+   * Controls the 🦞 prefix on AI-generated messages to external contacts.
+   * Defaults differ by mode: off in reply mode (preserves baseline BB behaviour),
+   * on in supervised mode when the agent draft is sent as-is.
+   * Owner-written custom replies ([msg-XXXX] your text) are never tagged
+   * regardless of this setting.
+   */
+  agentTag?: boolean;
 };
 
 export type BlueBubblesConfig = Omit<BlueBubblesAccountConfig, "actions"> & {
