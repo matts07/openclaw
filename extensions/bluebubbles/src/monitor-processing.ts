@@ -13,6 +13,12 @@ import {
   downloadBlueBubblesAttachment,
   fetchBlueBubblesMessageAttachments,
 } from "./attachments.js";
+import {
+  digitsOnly,
+  handleTrainerInbound,
+  handleTrainerOwnerReply,
+  resolveTrainerStateDirs,
+} from "./bbtrainer.js";
 import { markBlueBubblesChatRead, sendBlueBubblesTyping } from "./chat.js";
 import { createBlueBubblesClientFromParts } from "./client.js";
 import { resolveBlueBubblesConversationRoute } from "./conversation-route.js";
@@ -862,9 +868,52 @@ async function processMessageAfterDedupe(
     `msg sender=${message.senderId} group=${isGroup} textLen=${text.length} attachments=${attachments.length} chatGuid=${message.chatGuid ?? ""} chatId=${message.chatId ?? ""}`,
   );
 
+  // Early trainer owner intercept — must run before the allowlist gate so
+  // trainerNotifyNumber doesn't need to be in allowFrom.
+  if (!isGroup) {
+    const earlyTrainerMode = account.config.trainerMode ?? "reply";
+    if (earlyTrainerMode === "training" || earlyTrainerMode === "supervised") {
+      const earlyNotifyNumber = account.config.trainerNotifyNumber?.trim() ?? "";
+      if (
+        earlyNotifyNumber &&
+        message.senderId &&
+        digitsOnly(message.senderId) === digitsOnly(earlyNotifyNumber)
+      ) {
+        const { stateDir, workspaceDir } = resolveTrainerStateDirs(process.env, config);
+        const consumed = await handleTrainerOwnerReply({
+          replyText: message.text?.trim() ?? "",
+          account,
+          config,
+          runtime,
+          stateDir,
+          workspaceDir,
+        });
+        if (consumed) {
+          return;
+        }
+        // BB fires webhooks for API-sent messages without is_from_me, so outgoing
+        // trainer notifications echo back here. Drop them before they reach the agent.
+        // Covers inbound notification echoes (📨 [msg-) and status reply echoes (⚠️ msg-).
+        const echoText = message.text?.trim() ?? "";
+        if (echoText.startsWith("📨 [msg-") || echoText.startsWith("⚠️ msg-")) {
+          return;
+        }
+        // Not a trainer reply — fall through to normal allowlist/session handling.
+      }
+    }
+  }
+
   const dmPolicy = account.config.dmPolicy ?? "pairing";
   const groupPolicy = account.config.groupPolicy ?? "allowlist";
-  const configuredAllowFrom = mapAllowFromEntries(account.config.allowFrom);
+  const trainerMode = account.config.trainerMode ?? "reply";
+  const trainerAllowEntry =
+    trainerMode === "training" || trainerMode === "supervised"
+      ? account.config.trainerNotifyNumber?.trim()
+      : undefined;
+  const configuredAllowFrom = [
+    ...mapAllowFromEntries(account.config.allowFrom),
+    ...(trainerAllowEntry ? [trainerAllowEntry] : []),
+  ];
   const storeAllowFrom = await readStoreAllowFromForDmPolicy({
     provider: "bluebubbles",
     accountId: account.accountId,
@@ -991,6 +1040,51 @@ async function processMessageAfterDedupe(
     );
     return;
   }
+
+  // -- Supervised message training intercept ---------------------------------
+  // Fires after allowlist/dmPolicy checks pass, before any agent session is
+  // created. In training or supervised mode the message is never dispatched
+  // to the LLM via the normal channel reply path.
+  // Owner replies are handled in the early intercept above; here we only
+  // intercept inbound messages from non-owner senders.
+  if (!isGroup) {
+    const trainerMode = account.config.trainerMode ?? "reply";
+    const trainerNotifyNumber = account.config.trainerNotifyNumber?.trim() ?? "";
+    const { stateDir, workspaceDir } = resolveTrainerStateDirs(process.env, config);
+
+    if (trainerMode === "training" || trainerMode === "supervised") {
+      const senderIsOwner =
+        trainerNotifyNumber &&
+        message.senderId &&
+        digitsOnly(message.senderId) === digitsOnly(trainerNotifyNumber);
+
+      if (!senderIsOwner && text) {
+        const trainerRoute = resolveBlueBubblesConversationRoute({
+          cfg: config,
+          accountId: account.accountId,
+          isGroup: false,
+          peerId: message.senderId ?? "",
+          sender: message.senderId ?? "",
+          chatId: message.chatId ?? undefined,
+          chatGuid: message.chatGuid ?? undefined,
+          chatIdentifier: message.chatIdentifier ?? undefined,
+        });
+        await handleTrainerInbound({
+          message,
+          account,
+          config,
+          runtime,
+          trainerMode,
+          agentId: trainerRoute.agentId,
+          stateDir,
+          workspaceDir,
+        });
+        return;
+      }
+      // Owner's allowlisted non-trainer message falls through to agent session.
+    }
+  }
+  // -- End supervised training intercept ------------------------------------
 
   const chatId = message.chatId ?? undefined;
   const chatGuid = message.chatGuid ?? undefined;
@@ -1731,7 +1825,11 @@ async function processMessageAfterDedupe(
           if (!chunks.length) {
             return;
           }
+          // 🦞 tag is off by default in reply mode to preserve baseline BB behaviour.
+          // Enable explicitly with agentTag: true in config.
+          const agentTag = account.config.agentTag ?? false;
           for (const chunk of chunks) {
+            const taggedChunk = agentTag ? `🦞 ${chunk}` : chunk;
             const pendingId = rememberPendingOutboundMessageId({
               accountId: account.accountId,
               sessionKey: route.sessionKey,
@@ -1739,11 +1837,11 @@ async function processMessageAfterDedupe(
               chatGuid: chatGuidForActions ?? chatGuid,
               chatIdentifier,
               chatId,
-              snippet: chunk,
+              snippet: taggedChunk,
             });
             let result: Awaited<ReturnType<typeof sendMessageBlueBubbles>>;
             try {
-              result = await sendMessageBlueBubbles(outboundTarget, chunk, {
+              result = await sendMessageBlueBubbles(outboundTarget, taggedChunk, {
                 cfg: config,
                 accountId: account.accountId,
                 replyToMessageGuid: replyToMessageGuid || undefined,
@@ -1752,7 +1850,7 @@ async function processMessageAfterDedupe(
               forgetPendingOutboundMessageId(pendingId);
               throw err;
             }
-            if (maybeEnqueueOutboundMessageId(result.messageId, chunk)) {
+            if (maybeEnqueueOutboundMessageId(result.messageId, taggedChunk)) {
               forgetPendingOutboundMessageId(pendingId);
             }
             sentMessage = true;

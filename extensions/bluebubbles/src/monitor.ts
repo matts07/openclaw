@@ -3,6 +3,7 @@ import { safeEqualSecret } from "openclaw/plugin-sdk/browser-security-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveBlueBubblesEffectiveAllowPrivateNetwork } from "./accounts.js";
+import { expireTrainerPending, resolveTrainerStateDirs } from "./bbtrainer.js";
 import { createBlueBubblesDebounceRegistry } from "./monitor-debounce.js";
 import {
   asRecord,
@@ -391,6 +392,29 @@ export async function monitorBlueBubblesProvider(
           `[${account.accountId}] BlueBubbles catchup: unexpected failure: ${String(err)}`,
         );
       });
+
+    const trainerMode = account.config.trainerMode ?? "reply";
+    if (trainerMode === "training" || trainerMode === "supervised") {
+      const { stateDir } = resolveTrainerStateDirs(process.env, config);
+      expireTrainerPending({
+        stateDir,
+        account,
+        config,
+        runtime,
+      })
+        .then((count) => {
+          if (count > 0) {
+            runtime.log?.(
+              `[${account.accountId}] BlueBubbles trainer: expired ${count} pending message(s)`,
+            );
+          }
+        })
+        .catch((err) => {
+          runtime.error?.(
+            `[${account.accountId}] BlueBubbles trainer: expiry sweep failed: ${String(err)}`,
+          );
+        });
+    }
   });
 }
 
