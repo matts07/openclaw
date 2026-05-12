@@ -1482,6 +1482,9 @@ export const IMessageAccountSchemaBase = z
     heartbeat: ChannelHeartbeatVisibilitySchema,
     healthMonitor: ChannelHealthMonitorSchema,
     responsePrefix: z.string().optional(),
+    trainerMode: z.enum(["reply", "training", "supervised"]).optional(),
+    trainerNotifyNumber: z.string().optional(),
+    agentTag: z.boolean().optional(),
   })
   .strict();
 
@@ -1510,6 +1513,18 @@ export const IMessageConfigSchema = IMessageAccountSchemaBase.extend({
     message:
       'channels.imessage.dmPolicy="allowlist" requires channels.imessage.allowFrom to contain at least one sender ID',
   });
+
+  const trainerMode = value.trainerMode ?? "reply";
+  if (
+    (trainerMode === "training" || trainerMode === "supervised") &&
+    !value.trainerNotifyNumber?.trim()
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["trainerNotifyNumber"],
+      message: "trainerNotifyNumber is required when trainerMode is training or supervised",
+    });
+  }
 
   if (!value.accounts) {
     return;

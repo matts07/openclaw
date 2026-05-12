@@ -164,6 +164,12 @@ export type IMessageAccountConfig = {
   healthMonitor?: ChannelHealthMonitorConfig;
   /** Outbound response prefix override for this channel/account. */
   responsePrefix?: string;
+  /** Trainer mode for supervised/training message review workflows. */
+  trainerMode?: "reply" | "training" | "supervised";
+  /** Phone number to notify when a message is intercepted in trainer mode. */
+  trainerNotifyNumber?: string;
+  /** Prefix AI-approved drafts with a 🦞 tag in supervised mode. */
+  agentTag?: boolean;
 };
 
 export type IMessageConfig = {
