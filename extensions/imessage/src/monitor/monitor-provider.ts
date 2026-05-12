@@ -42,6 +42,12 @@ import {
 import { probeIMessage } from "../probe.js";
 import { sendMessageIMessage } from "../send.js";
 import { normalizeIMessageHandle } from "../targets.js";
+import {
+  createTrainerSendInterceptor,
+  digitsOnly,
+  handleTrainerOwnerReply,
+  resolveTrainerStateDirs,
+} from "../trainer.js";
 import { attachIMessageMonitorAbortHandler } from "./abort-handler.js";
 import { deliverReplies } from "./deliver.js";
 import { createSentMessageCache } from "./echo-cache.js";
@@ -273,11 +279,50 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
         : "";
     const bodyText = messageText || placeholder;
 
+    // Trainer: pre-allowlist intercept for messages from the owner's notify number.
+    // Runs before the allowlist gate so trainerNotifyNumber is not required in allowFrom.
+    const isGroupMessage = Boolean(message.is_group);
+    if (!isGroupMessage && !message.is_from_me) {
+      const imsgTrainerMode = imessageCfg.trainerMode ?? "reply";
+      const imsgNotifyNumber = imessageCfg.trainerNotifyNumber?.trim() ?? "";
+      if (
+        (imsgTrainerMode === "training" || imsgTrainerMode === "supervised") &&
+        imsgNotifyNumber
+      ) {
+        const senderRaw = (message.sender ?? "").trim();
+        const senderDigits = digitsOnly(senderRaw);
+        const notifyDigits = digitsOnly(imsgNotifyNumber);
+        if (senderDigits && senderDigits === notifyDigits) {
+          const { stateDir, workspaceDir } = resolveTrainerStateDirs(process.env, cfg);
+          const consumed = await handleTrainerOwnerReply({
+            replyText: bodyText,
+            account: accountInfo,
+            config: cfg,
+            runtime,
+            stateDir,
+            workspaceDir,
+          });
+          if (consumed) {
+            return;
+          }
+          // Not a trainer command — fall through to normal allowlist/session handling.
+          // is_from_me on trainer notifications prevents echo loops automatically.
+        }
+      }
+    }
+
     const storeAllowFrom = await readChannelAllowFromStore(
       "imessage",
       process.env,
       accountInfo.accountId,
     ).catch(() => []);
+
+    const imsgTrainerEffectiveAllowFrom =
+      (imessageCfg.trainerMode === "training" || imessageCfg.trainerMode === "supervised") &&
+      imessageCfg.trainerNotifyNumber?.trim()
+        ? [...allowFrom, imessageCfg.trainerNotifyNumber.trim()]
+        : allowFrom;
+
     const decision = resolveIMessageInboundDecision({
       cfg,
       accountId: accountInfo.accountId,
@@ -285,7 +330,7 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
       opts,
       messageText,
       bodyText,
-      allowFrom,
+      allowFrom: imsgTrainerEffectiveAllowFrom,
       groupAllowFrom,
       groupPolicy,
       dmPolicy,
@@ -450,6 +495,54 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
           runtime.error?.(danger("imessage: missing delivery target"));
           return;
         }
+
+        const imsgTrainerMode = imessageCfg.trainerMode ?? "reply";
+        const imsgNotifyNumber = imessageCfg.trainerNotifyNumber?.trim() ?? "";
+        if (
+          (imsgTrainerMode === "training" || imsgTrainerMode === "supervised") &&
+          imsgNotifyNumber &&
+          !decision.isGroup
+        ) {
+          const senderDigits = digitsOnly(decision.senderNormalized ?? "");
+          const notifyDigits = digitsOnly(imsgNotifyNumber);
+          const senderIsOwner = !!senderDigits && senderDigits === notifyDigits;
+          if (!senderIsOwner) {
+            const { stateDir } = resolveTrainerStateDirs(process.env, cfg);
+            const trainerSend = createTrainerSendInterceptor(
+              async (to, text) => {
+                await sendMessageIMessage(to, text, {
+                  config: cfg,
+                  accountId: accountInfo.accountId,
+                  client: getActiveClient(),
+                });
+              },
+              {
+                mode: imsgTrainerMode as "training" | "supervised",
+                notifyNumber: imsgNotifyNumber,
+                accountId: accountInfo.accountId,
+                config: cfg,
+                runtime,
+                stateDir,
+                originalFrom: target,
+                originalFromName: decision.senderNormalized ?? decision.sender,
+                originalContent: ctxPayload.Body ?? "",
+                originalMessageId: (message.guid ?? "").trim(),
+              },
+            );
+
+            // Intercept text replies via trainer; media replies are flagged as draftFailed.
+            const payloadText = payload.text?.trim() ?? "";
+            const hasMedia = Boolean(payload.mediaUrl?.trim());
+            if (hasMedia) {
+              const mediaDesc = `<media reply>`;
+              await trainerSend(target, mediaDesc);
+            } else if (payloadText) {
+              await trainerSend(target, payloadText);
+            }
+            return;
+          }
+        }
+
         await deliverReplies({
           cfg,
           replies: [payload],
